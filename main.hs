@@ -22,7 +22,7 @@ type TransitionMap = Map Int   (Map (Char) [(Int,       Int)])
 data MFA = MFA 
     { nstates :: Int
     , trans   :: TransitionMap
-    , initial :: [Int]
+    , initial :: Int
     , final   :: [Int]
     } deriving Show
 
@@ -40,12 +40,12 @@ merge l1 l2 = (Set.toList . Set.fromList) (l1 ++ l2)
 
 -- do a run over a MFA without epsions
 run :: String -> MFA -> [(Int,Int)]
-run str mfa = run_helper [(i, 0) | i <- initial mfa] str mfa
+run str mfa = run_helper [(initial mfa, 0)] str mfa
     where 
         run_helper :: [(Int,Int)] -> String -> MFA -> [(Int,Int)]
         run_helper [] _ mfa = []
-        run_helper state [] mfa = [(s, acc) | (s, acc) <- state, elem s (final mfa)]
-        run_helper state (letter:xs) mfa = (run_helper ([(n, acc + a) | (s, acc) <- state, (n, a) <- nextstates mfa s letter]) xs mfa)
+        run_helper state [] mfa =  [(s, acc) | (s, acc) <- state, elem s (final mfa)]
+        run_helper state (letter:xs) mfa = run_helper ([(n, acc + a) | (s, acc) <- state, (n, a) <- nextstates mfa s letter]) xs mfa
 
 -- do a run over a MFA with epsilons
 run_slow :: String -> MFA -> [(Int,Int)]
@@ -72,7 +72,7 @@ single_trans s c n v =  Map.fromList [(s, Map.fromList [(c, [(n, v)])])]
 
 fix_for_kleene :: MFA -> MFA
 fix_for_kleene mfa =
-    let i = (head (initial mfa))
+    let i = initial mfa
         f = traceShowId $ fwd_epsilon mfa i
     in if (any (\x -> elem x (final mfa)) f)
            then (MFA (nstates mfa) (trans mfa) (initial mfa) (merge [i] (filter (\s -> not $ elem s f) (final mfa))))
@@ -83,22 +83,21 @@ fix_for_kleene mfa =
 regex_to_mfa :: Int -> Regex -> MFA
 
 regex_to_mfa s (Primitive c i) =
-    MFA 2 (single_trans s c (s + 1) i) [s] [s + 1]
+    MFA 2 (single_trans s c (s + 1) i) s [s + 1]
 
 regex_to_mfa s (RSum r1 r2) =
     MFA (nstates1 + nstates2 + 1)
         (merge_trans 
             [ t1 , t2 
-            , Map.fromList [(s, Map.fromList [('\0', [(qi, 0) | qi <- init1 ++ init2])])]])
-        [s]
-        (final1 ++ final2)
+            , Map.fromList [(s, Map.fromList [('\0', [(qi, 0) | qi <- [init1, init2]])])]])
+        s (final1 ++ final2)
     where
         MFA nstates1 t1 init1 final1 = regex_to_mfa (s + 1)            r1
         MFA nstates2 t2 init2 final2 = regex_to_mfa (s + 1 + nstates1) r2
 
 regex_to_mfa s (RMul r1 r2) =
     MFA (nstates1 + nstates2)
-        (merge_trans [t1, t2, Map.fromList [(f1, Map.fromList [('\0', [(i2, 0) | i2 <- init2])]) | f1 <- final1]])
+        (merge_trans [t1, t2, Map.fromList [(f1, Map.fromList [('\0', [(init2, 0)])]) | f1 <- final1]])
         init1
         final2
     where
@@ -110,10 +109,9 @@ regex_to_mfa s (Kleene r) =
         (merge_trans 
             [ t
             , (single_trans (s + 1) '\0' s 0)
-            , Map.fromList [(s,  Map.fromList [('\0', [(qi, 0) | qi <- init])])]
-            , Map.fromList [(qf, Map.fromList [('\0', [(s + 1, 0)])]) | qf <- (filter (/= (head init))final)]])
-        [s]
-        [s, s + 1]
+            , Map.fromList [(s,  Map.fromList [('\0', [(init, 0)])])]
+            , Map.fromList [(qf, Map.fromList [('\0', [(s + 1, 0)])]) | qf <- (filter (/= init) final)]])
+        s [s, s + 1]
     where
         MFA nstates t init final = fix_for_kleene $ regex_to_mfa (s + 2) r
 
@@ -130,7 +128,7 @@ fwd_epsilon mfa state = fwd_helper [] mfa state
 
 
 remove_epsilons :: MFA -> MFA
-remove_epsilons mfa = remove_epsilons_helper [] (trans mfa) (head (initial mfa)) mfa
+remove_epsilons mfa = remove_epsilons_helper [] (trans mfa) (initial mfa) mfa
     where
 --                                Done  ->               -> CurrentState ->     -> 
         remove_epsilons_helper :: [Int] -> TransitionMap -> Int          -> MFA -> MFA
@@ -158,18 +156,19 @@ remove_epsilons mfa = remove_epsilons_helper [] (trans mfa) (head (initial mfa))
                          in rem1 done1 acc1 state mfa xs
                       
 
-lower :: Int -> [Int] -> [Int]
-lower rm [] = []
-lower rm (x:xs)
-    | x <  rm = x:(lower rm xs)
-    | x == rm = lower rm xs
-    | x >  rm = (x - 1):(lower rm xs)
-lower_trans :: Int -> TransitionMap -> TransitionMap
-lower_trans rm m = Map.fromList [(if s > rm then s - 1 else s, Map.map (\ls -> [(if x < rm then x else x - 1,y) | (x,y) <- ls, x /= rm]) sm) | (s, sm) <- (Map.toList m), s /= rm]
 
 remove_state :: Int -> MFA -> MFA
 remove_state rm (MFA nstates trans init final)
-    = MFA (nstates - 1) (lower_trans rm trans) (lower rm init) (lower rm final)
+    = MFA (nstates - 1) (lower_trans rm trans) (if rm < init then init - 1 else init) (lower rm final)
+    where
+        lower :: Int -> [Int] -> [Int]
+        lower rm [] = []
+        lower rm (x:xs)
+            | x <  rm = x:(lower rm xs)
+            | x == rm = lower rm xs
+            | x >  rm = (x - 1):(lower rm xs)
+        lower_trans :: Int -> TransitionMap -> TransitionMap
+        lower_trans rm m = Map.fromList [(if s > rm then s - 1 else s, Map.map (\ls -> [(if x < rm then x else x - 1,y) | (x,y) <- ls, x /= rm]) sm) | (s, sm) <- (Map.toList m), s /= rm]
 
 
 
@@ -189,7 +188,7 @@ reachable_states visited (x:xs) mfa
                                    mfa
 
 remove_unreachable_states :: MFA -> MFA
-remove_unreachable_states mfa = let reachable = reachable_states [] (initial mfa) mfa
+remove_unreachable_states mfa = let reachable = reachable_states [] [initial mfa] mfa
                                     unreachable = sort [s | s <- [0..(nstates mfa)-1], not $ elem s reachable]
                                 in foldr remove_state mfa unreachable
 
@@ -222,11 +221,10 @@ repeatp (Parser p) = Parser (\str -> case (p str) of
                                                    in Just (val:lst, r))
 parse_word = repeatp $ parse_char_if isLower
 parse_number = fmap read (repeatp $ parse_char_if isDigit)
+
 parse_primitive = fn <$> parse_word <*> parse_char_if (== ':') <*> parse_number
     where fn (x:[]) _ n = Primitive x n
           fn (x:xs) _ n = RMul (Primitive x 0) (fn xs ':' n)
-
-
 
 --             IsSum  -> Last was bracket -> Stack   -> Remaining Tokens -> (Output, Remaining)
 parse_regex :: Bool   -> Bool             -> [Regex] -> String           -> (Regex,  String)
