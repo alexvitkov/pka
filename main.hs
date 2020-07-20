@@ -70,8 +70,8 @@ merge_trans = foldr1 $ Map.unionWith $ Map.unionWith merge
 single_trans :: Int -> Char -> Int -> Int -> TransitionMap
 single_trans s c n v =  Map.fromList [(s, Map.fromList [(c, [(n, v)])])]
 
-fix_for_klenee :: MFA -> MFA
-fix_for_klenee mfa =
+fix_for_kleene :: MFA -> MFA
+fix_for_kleene mfa =
     let i = (head (initial mfa))
         f = traceShowId $ fwd_epsilon mfa i
     in if (any (\x -> elem x (final mfa)) f)
@@ -115,7 +115,7 @@ regex_to_mfa s (Kleene r) =
         [s]
         [s, s + 1]
     where
-        MFA nstates t init final = fix_for_klenee $ regex_to_mfa (s + 2) r
+        MFA nstates t init final = fix_for_kleene $ regex_to_mfa (s + 2) r
 
 
 --                       Visited ->     -> State ->
