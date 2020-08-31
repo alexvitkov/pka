@@ -15,7 +15,8 @@ data Regex  = Primitive Char Int
             | RSum Regex Regex
             | RMul Regex Regex
             | Kleene Regex
-            deriving (Show) --                       State             [(NextState, Add)]
+            deriving (Show) 
+--                       State             [(NextState, Add)]
 type TransitionMap = Map Int   (Map (Char) [(Int,       Int)])
 
 data MFA = MFA 
@@ -55,8 +56,8 @@ run str mfa = run_helper [(initial mfa, 0)] str mfa
     where 
         run_helper :: [(Int,Int)] -> String -> MFA -> [(Int,Int)]
         run_helper [] _ mfa = []
-        run_helper state [] mfa =  [(s, acc + finaladd mfa s) | (s, acc) <- state, elem s (final mfa)]
-        run_helper state (letter:xs) mfa = run_helper ([(n, acc + a) | (s, acc) <- state, (n, a) <- nextstates mfa s letter]) xs mfa
+        run_helper state [] mfa =   [(s, acc + finaladd mfa s) | (s, acc) <- state, elem s (final mfa)]
+        run_helper state (letter:xs) mfa =  run_helper ([(n, acc + a) | (s, acc) <- state, (n, a) <- nextstates mfa s letter]) xs mfa
 
 -- do a run over a MFA with epsilons
 run_slow :: String -> MFA -> [(Int,Int)]
@@ -223,7 +224,11 @@ remove_epsilons mfa = remove_epsilons_helper [] (trans mfa) (initial mfa) mfa
 
 remove_state :: Int -> MFA -> MFA
 remove_state rm (MFA nstates trans init final fa)
-    = MFA (nstates - 1) (lower_trans rm trans) (if rm < init then init - 1 else init) (lower rm final) fa -- TODO 
+    = MFA (nstates - 1) 
+          (lower_trans rm trans) 
+          (if rm < init then init - 1 else init) 
+          (lower rm final) 
+          (Map.fromList [(if k < rm then k else k - 1, v) | (k, v) <- Map.toList fa, k /= rm])
     where
         lower :: Int -> [Int] -> [Int]
         lower rm [] = []
@@ -242,10 +247,10 @@ directly_reachable state mfa = fromMaybe [] $ do
 
 
 
-remove_unreachable_states :: MFA -> MFA
-remove_unreachable_states mfa = let reachable = reachable_states [] [initial mfa] mfa
-                                    unreachable = sort [s | s <- [0..(nstates mfa)-1], not $ elem s reachable]
-                                in foldr remove_state mfa unreachable
+trim :: MFA -> MFA
+trim mfa = let reachable = reachable_states [] [initial mfa] mfa
+               unreachable = sort [s | s <- [0..(nstates mfa)-1], not $ elem s reachable]
+           in foldr remove_state mfa unreachable
     where 
         reachable_states :: [Int] -> [Int] -> MFA -> [Int]
         reachable_states visited [] mfa = visited
@@ -301,28 +306,108 @@ data SMFA = SMFA
     { strans     :: SquaredTransitionMap
     , sinitial   :: Int
     , sfinal     :: [Int]
-    -- , sfinal_add :: Map Int Int
+    , sfinal_add :: Map Int (Int,Int)
     } deriving Show
 
-square_auto :: MFA -> SMFA
-square_auto mfa = SMFA stmap
-                       (sstate (initial mfa) (initial mfa)) 
-                       [sstate f1 f2 | f1 <- final mfa, f2 <- final mfa]
+ssrev :: Int -> Int -> (Int, Int)
+ssrev nstates inp = (inp `quot` nstates, inp `mod` nstates)
+
+squared_auto_trim :: SMFA -> SMFA
+squared_auto_trim (SMFA t i f fa) =
+    let visited = [i] ++ [n | (_, n, _, _) <- t]
+    in SMFA [(c, n, v1, v2) | (c, n, v1, v2) <- t, elem c visited] i f fa
+
+
+square_auto2 :: MFA -> SMFA
+square_auto2 mfa =
+    SMFA (ttable mfa [(initial mfa, initial mfa)] Set.empty [])
+         (sstate (initial mfa) (initial mfa)) 
+         [sstate f1 f2 | f1 <- final mfa, f2 <- final mfa]
+         (Map.fromList [(sstate f1 f2, (finaladd mfa f1, finaladd mfa f2)) | f1 <- final mfa, f2 <- final mfa])
     where
         sstate :: Int -> Int -> Int
         sstate s1 s2 = (nstates mfa) * s1 + s2
+        ttable :: MFA -> [(Int,Int)] -> Set (Int,Int) -> SquaredTransitionMap -> SquaredTransitionMap
+        ttable mfa [] _ acc = acc
+        ttable mfa ((c1,c2):xs) visited acc = 
+            ttable mfa (next_unvisited ++ xs) (Set.insert (c1,c2) visited) (trs ++ acc)
+            where
+                a = fromMaybe (Map.fromList []) $ Map.lookup c1 (trans mfa)
+                b = fromMaybe (Map.fromList []) $ Map.lookup c2 (trans mfa)
+                trs = [((sstate c1 c2), (sstate n1 n2), v1, v2) | (ch1, val1) <- Map.toList a, (ch2, val2) <- Map.toList b, ch1 == ch2, (n1, v1) <- val1, (n2, v2) <- val2]
+                next_unvisited =  [nn | (_, n, _, _) <- trs, let nn = ssrev (nstates mfa) n, Set.notMember nn visited, not $ elem nn ((c1,c2):xs)]
 
---           Previous     Advance      NextDelta
-        w :: (Int,Int) -> (Int,Int) -> (Int,Int)
-        w (a,b) (a1, b1) = 
-            let an = a + a1
-                bn = b + b1
-                m = min an bn
-            in (an - m, bn - m)
 
-        tlist = [(p, ch, n, v)  | (p, m1) <- Map.toList (trans mfa), (ch, l) <- Map.toList m1, (n, v) <- l]
-        stmap = [(sstate p1 p2, sstate n1 n2, v1, v2) | (p1, ch, n1, v1) <- tlist, (p2, ch, n2, v2) <- tlist]
 
+type Adm = (Int,Int)
+
+add_adm :: Adm -> Adm -> Adm
+add_adm (a,b) (x,y) = (a + x - m, b + y - m) where m = min (a + x) (b + y)
+
+adm_normalize :: Adm -> Adm
+adm_normalize (a,b)  = (a - m, b - m) where m = min a b
+
+add_adm_to_list :: Adm -> [Adm] -> [Adm]
+add_adm_to_list a1 l =  let n = adm_normalize a1 in if elem a1 l then l else n:l
+
+snext :: SquaredTransitionMap -> Int -> [(Int,Int,Int)]
+snext tm current = [(n, v1, v2) | (c, n, v1, v2) <- tm, current == c]
+
+--                State
+type AdmMap = Map Int   [Adm]
+
+calc_adm_single_step :: SMFA -> Int -> AdmMap -> Maybe AdmMap
+calc_adm_single_step (SMFA t i f fa) state map = 
+    let next_states =  snext t state
+        vv = head $ fromJust $ Map.lookup state map
+        helper :: AdmMap -> [(Int,Int,Int)] -> Maybe AdmMap
+        helper adm [] = Just adm
+        helper adm ((n,v1,v2):xs) = 
+            let step = if Map.member n adm
+                       then (Map.adjust (add_adm_to_list (add_adm vv (v1, v2)) ) n adm)
+                       else Map.insert n (add_adm_to_list (add_adm vv (v1, v2)) []) adm
+            in if any (> 1) ([fromMaybe 0 (fmap length (Map.lookup ns step)) | (ns, _, _) <- next_states])
+               then Nothing
+               else helper step xs
+    in helper map next_states
+
+sstatenumbers :: SMFA -> [Int]
+sstatenumbers (SMFA t i f fa) = Set.toList $ Set.fromList $ [i] ++ f ++ [c | (c, n, _, _) <- t]
+
+initial_adm :: SMFA -> AdmMap
+initial_adm  (SMFA t i f fa) = Map.fromList [(i, [(0, 0)])]
+
+--                                 tovisit   visited
+calc_adm_step :: SMFA -> AdmMap -> [Int] -> [Int] -> Maybe AdmMap
+
+calc_adm_step _ adm [] _ = Just adm
+calc_adm_step (SMFA t i f fa) adm (x:xs) visited = 
+    do
+        let next = snext t x
+        let next_unvisited = [n | (n,_,_) <- next, not $ elem n visited]
+        let smfa = SMFA t i f fa
+        map1 <- (calc_adm_single_step smfa x adm)
+        calc_adm_step smfa map1 (xs ++ next_unvisited) (x:visited)
+
+
+is_functional :: SMFA -> Bool
+is_functional (SMFA t i f fa) = 
+    let smfa = SMFA t i f fa
+        helper :: SMFA -> AdmMap -> Maybe AdmMap
+        helper smfa inmap = do res <- calc_adm_step smfa inmap [i] []
+                               if res == inmap then
+                                   return inmap
+                               else
+                                   --traceShow res $ helper smfa res
+                                   helper smfa res
+        final = (helper smfa (initial_adm smfa))
+    in
+        if final == Nothing
+        then False
+        else
+            all (== (0,0))  $ concat [[adm_normalize (v1 + f1,v2 + f2) | (v1,v2) <- adm] | (k,adm) <- Map.toList $ fromJust final, elem k f, let (f1, f2) = fromJust $ Map.lookup k fa]
+
+                
 
 parse_regex :: String -> Regex
 parse_regex str = rgh [] [] str
@@ -359,20 +444,27 @@ main = do
     let mfa0 = regex_to_mfa 0 regex
 
     let (mfa1,inf) = collapse_all mfa0
-    putStrLn $ "The MFA has " ++ show (nstates mfa1) ++ " states"
+    -- putStrLn $ "The MFA has " ++ show (nstates mfa1) ++ " states"
 
     if inf then do
-        putStrLn $ "It is infinitely ambiguous"
+        putStrLn $ "The MFA is infinitely ambiguous"
         putStr $ "Output: "
         print $ [acc | (_, acc) <- run_slow input mfa0]
     else do
-        -- print mfa0
         let mfa2 =  remove_epsilons mfa1
-        let mfa3 =  traceShowId $ remove_unreachable_states mfa2
-        print $ square_auto mfa3
-        putStr $ "Output: "
-        print $ [acc | (_, acc) <- run input mfa3]
+        let mfa3 =  trim mfa2
+        -- putStrLn $ "MFA3: " ++ show mfa3
 
-        -- print $ square_auto $ mfa2
+        let smfa = square_auto2 mfa3
+        -- putStrLn "Squared auto: "
+        -- putStrLn $ show smfa
+
+        if (is_functional smfa) then
+            putStrLn $ "The MFA is functional."
+        else
+            putStrLn $ "The MFA is not functional."
+
+        putStr $ "Output: "
+        print $ Set.toList $ Set.fromList $ [acc | (_, acc) <- run input mfa3]
 
     return ()
